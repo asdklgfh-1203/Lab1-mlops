@@ -1,121 +1,143 @@
-# Lab 1：在 Kubernetes 上部署第一個模型服務
+# MLOps Foundations and Cloud Native AI — Lab 1
 
-本作業會訓練 Iris 分類模型，以 MLflow 記錄訓練結果，再用 FastAPI 提供預測 API，最後部署到本機 Kubernetes 並觀察 HPA 擴容。
+This project demonstrates a small end-to-end MLOps workflow. It trains an Iris classifier, tracks the training run with MLflow, serves predictions through FastAPI, packages the service as a Docker image, and deploys it to a local Kubernetes cluster with CPU-based autoscaling.
 
-## 1. 建立本機叢集
+## Architecture
 
-本指南使用 Docker Desktop + kind。在 Docker Desktop 顯示執行中後，於此資料夾開啟 PowerShell。`.tools` 內含本次準備的 kind 和 kubectl，不必全域安裝：
+- **Training:** scikit-learn Random Forest classifier trained on the Iris dataset.
+- **Experiment tracking:** MLflow records model parameters, accuracy, and model artifacts.
+- **Inference API:** FastAPI exposes health-check and prediction endpoints.
+- **Containerization:** Docker packages the API and trained model.
+- **Orchestration:** kind runs the local Kubernetes cluster; Kubernetes Deployment and Service expose the API inside the cluster.
+- **Autoscaling:** Horizontal Pod Autoscaler (HPA) adjusts the API replica count based on CPU utilization.
+
+## Prerequisites
+
+- Windows with Docker Desktop running in Linux-container mode.
+- Python 3.12 for creating a new virtual environment.
+- PowerShell.
+
+The prepared workspace includes local `kind` and `kubectl` binaries in `.tools` and an installed Python environment in `.venv-lab`. These local tools and environments are excluded from Git.
+
+Run the PowerShell commands below from the project root unless noted otherwise.
+
+## 1. Train the model and track the run
+
+From the project directory, run:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-& .\.tools\kind.exe version
-& .\.tools\kubectl.exe version --client
+& .\.venv-lab\Scripts\python.exe .\train.py
 ```
 
-## 2. 建立 Python 環境並訓練模型
+The script saves `model.pkl` and logs the training parameters, accuracy, and model artifact to the local `mlruns` directory. Both `model.pkl` and `mlruns` are generated locally and excluded from Git; rerun training to recreate them.
 
-在這次準備好的工作區，可以直接使用已安裝好依賴的虛擬環境：
+To open the MLflow UI in a separate PowerShell window:
 
 ```powershell
-.\.venv-lab\Scripts\python.exe train.py
+& .\.venv-lab\Scripts\python.exe -m mlflow ui --backend-store-uri .\mlruns --host 127.0.0.1 --port 5000
 ```
 
-若在另一台電腦重新建立環境，請先安裝 Python 3.12，再在此專案資料夾執行：
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000), select the `iris` experiment, and review the recorded run, parameters, and accuracy.
+
+To create a new Python environment instead of using the prepared one:
 
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python train.py
+python .\train.py
 ```
 
-這會建立 `model.pkl`，並將參數、準確率和模型紀錄到本機 `mlruns` 資料夾。
+## 2. Create the local Kubernetes deployment
 
-另開一個 PowerShell 視窗並進入同一資料夾，查看 MLflow。這次工作區可執行：
-
-```powershell
-.\.venv-lab\Scripts\python.exe -m mlflow ui --backend-store-uri ./mlruns --host 127.0.0.1 --port 5000
-```
-
-若是重新建立的環境，則先啟用 `.venv`，再執行：
+Start Docker Desktop, then run the deployment script:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-mlflow ui --backend-store-uri ./mlruns --host 127.0.0.1 --port 5000
-```
-
-瀏覽 `http://127.0.0.1:5000`，截下 `iris` experiment 的 run、參數和 accuracy，存成 `screenshots/mlflow-run.png`。
-
-## 3. 建立叢集、映像並部署
-
-執行部署腳本。它會依序確認 Docker、建立 `mlops` 叢集、建置容器映像、將映像載入 kind，並套用 Deployment、Service 和 HPA：
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\deploy-lab.ps1
 ```
 
-## 4. 啟用 CPU metrics 並呼叫預測 API
+The script checks Docker connectivity, creates the `mlops` kind cluster if needed, builds `iris-api:v1`, loads the image into kind, and applies the Kubernetes Deployment, Service, and HPA manifests.
 
-HPA 必須先讀得到 CPU 數據。執行 `enable-hpa.ps1` 會部署 metrics-server、設定 kind 所需的 kubelet 連線選項，並確認 `kubectl top nodes` 有資料。
+## 3. Enable CPU metrics
+
+The HPA requires CPU metrics from Metrics Server. Run:
 
 ```powershell
 .\enable-hpa.ps1
 ```
 
-接著另開 PowerShell 視窗，保持 port-forward 執行：
+The script deploys Metrics Server, applies the kubelet option required by this local kind cluster, and waits until `kubectl top nodes` can return metrics.
+
+## 4. Verify the API
+
+In a separate PowerShell window, start port forwarding and leave it running while sending requests:
 
 ```powershell
 & .\.tools\kubectl.exe --context kind-mlops port-forward svc/iris-api 8080:80
 ```
 
-再開一個 PowerShell 視窗測試：
+From another PowerShell window, verify the health endpoint and submit a prediction request:
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://localhost:8080/predict `
+Invoke-RestMethod -Uri http://127.0.0.1:8080/healthz
+
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/predict `
   -ContentType 'application/json' `
   -Body '{"instances":[[5.1,3.5,1.4,0.2]]}'
 ```
 
-預期會收到包含 `predictions` 的 JSON。可用 `http://localhost:8080/healthz` 確認健康檢查。
+The health endpoint should return `ok: true`; the prediction endpoint should return a `predictions` array.
 
-## 5. 產生負載並確認自動擴容
+## 5. Demonstrate HPA scaling
 
-確認 `kubectl top nodes` 能讀到 CPU 使用率後，開一個視窗持續觀察 HPA：
+Open separate PowerShell windows to monitor HPA and Pods:
 
 ```powershell
-& .\.tools\kubectl.exe --context kind-mlops get hpa iris-api -w
+& .\.tools\kubectl.exe --context kind-mlops get hpa iris-api --watch
 ```
 
-另開視窗以專案內的 Python load generator 產生 60 秒、50 個併發工作負載：
-
 ```powershell
-& .\.venv-lab\Scripts\python.exe .\load_test.py --seconds 60 --workers 50
+& .\.tools\kubectl.exe --context kind-mlops get pods -l app=iris-api --watch
 ```
 
-另開一個視窗查看 Pod 數量：
+Run the load generator from another PowerShell window:
 
 ```powershell
-& .\.tools\kubectl.exe --context kind-mlops get pods -w
+& .\.venv-lab\Scripts\python.exe .\load_test.py --seconds 60 --workers 10 --batch-size 100
 ```
 
-此範例模型非常輕量，所以 Deployment 設定 `PREDICTION_REPEATS=20`，讓每個預測請求重複執行推論以產生足夠 CPU 負載；回傳結果不變。應用程式預設值仍是 1，只有這份本機 HPA 示範設定會提高工作量。
+This Iris model is computationally lightweight. For the local autoscaling demonstration, the Deployment sets `PREDICTION_REPEATS=20`, causing each API request to repeat the same inference while returning the same prediction. The application defaults to one inference when this environment variable is not set. The CPU request remains at `100m`, and the HPA target is 50% of the requested CPU.
 
-等待 HPA 更新後，截下 HPA 與 Pod 數量變化，存成 `screenshots/hpa-scaling.png`。擴容需要一段時間；如果 CPU 顯示 `<unknown>`，先處理 metrics-server。
+HPA scale-up can take time and depends on measured CPU utilization. If CPU use falls below the target, Kubernetes may later scale the Deployment back down. A successful load-test run does not guarantee that every run will trigger scaling.
 
-## 交付前確認
+## Evidence
 
-- GitHub repo 包含 `train.py`、`app.py`、`Dockerfile`、`deployment.yaml`、`requirements.txt`、`requirements-api.txt` 和 README。
-- `model.pkl` 可由 `python train.py` 重新產生，不必提交大型模型檔。
-- repo 中有 MLflow run 與 HPA 擴容截圖。
+Screenshots are stored in `screenshots/`:
 
-## 清理本機叢集
+- `mlflow-run.png` — MLflow experiment run, parameters, and accuracy.
+- `hpa-scaling.png` — HPA CPU utilization and replica-count change.
+- `pods-scaled.png` — API Pod startup and readiness during scaling.
+- `load-test.png` — load-test request and error totals.
 
-保存程式與截圖後，停止 port-forward（按 `Ctrl+C`），再刪除 kind 叢集。此腳本保留專案檔案和 Docker 映像：
+## Project files
+
+- `train.py` — trains and logs the Iris model.
+- `app.py` — FastAPI inference service.
+- `Dockerfile` — builds the API container image.
+- `deployment.yaml` — Kubernetes Deployment, Service, and HPA.
+- `load_test.py` — concurrent HTTP load generator.
+- `deploy-lab.ps1` — builds and deploys the local application.
+- `enable-hpa.ps1` — installs and configures Metrics Server for kind.
+- `cleanup-lab.ps1` — removes the local kind cluster while preserving project files and the Docker image.
+
+## Cleanup
+
+After saving the evidence and submitting the project, stop port forwarding with `Ctrl+C`. To delete the local kind cluster, run:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\cleanup-lab.ps1
 ```
+
+The cleanup script removes the `mlops` kind cluster. It preserves the source files, screenshots, and Docker image.
