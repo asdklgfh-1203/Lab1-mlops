@@ -1,0 +1,11 @@
+.venv/
+.venv-lab/
+.tools/
+.pip-tmp/
+.pip-cache/
+.tmp/
+__pycache__/
+*.py[cod]
+mlruns/
+model.pkl
+.env
